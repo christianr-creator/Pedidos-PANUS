@@ -6,155 +6,138 @@ import os
 
 st.set_page_config(page_title="Dashboard PANUS", layout="wide")
 
-@st.cache_data(ttl=60)
-def cargar_datos_resumen():
+# --- 1. CSS PARA CABECERAS VERTICALES ---
+st.markdown("""
+    <style>
+    th { vertical-align: bottom !important; text-align: center !important; height: 150px !important; }
+    th > div {
+        writing-mode: vertical-rl !important;
+        transform: rotate(180deg) !important;
+        white-space: nowrap !important;
+        font-family: sans-serif !important;
+        font-size: 13px !important;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# --- 2. CONEXIÓN ---
+def obtener_cliente():
     try:
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        
-
-        # --- LÓGICA PARA DETECTAR SI ESTÁ EN LA NUBE O EN TU PC ---
+        # Esta línea permite que funcione en la nube usando los Secrets que ya configuraste
         if "gcp_service_account" in st.secrets:
-            # Si está en Streamlit Cloud
             creds_dict = dict(st.secrets["gcp_service_account"])
-            
-            # TRUCO: Reparar la llave privada si viene con errores de formato
-            if "private_key" in creds_dict:
-                creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
-            
             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-               
-        client = gspread.authorize(creds)
-        spreadsheet = client.open("Ventas PANUS 2026")
+        else:
+            # Esto es para cuando lo pruebes tú en tu PC
+            ruta_json = os.path.join(os.path.dirname(__file__), "credenciales.json")
+            creds = ServiceAccountCredentials.from_json_keyfile_name(ruta_json, scope)
+        return gspread.authorize(creds)
+    except Exception as e:
+        st.error(f"Error de credenciales: {e}")
+        return None
+
+@st.cache_data(ttl=5)
+def cargar_datos_seguro(nombre_archivo, nombre_pestana):
+    client = obtener_cliente()
+    if not client: return pd.DataFrame()
+    
+    try:
+        sh = client.open(nombre_archivo)
+    except gspread.exceptions.SpreadsheetNotFound:
+        archivos_visibles = [f.get('name') for f in client.list_spreadsheet_files()]
+        st.error(f"❌ No se encontró el archivo '{nombre_archivo}'")
+        st.info(f"Archivos que sí puedo ver: {archivos_visibles}")
+        return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Fallo al abrir libro: {e}")
+        return pd.DataFrame()
+
+    try:
+        worksheets = sh.worksheets()
+        target_ws = next((ws for ws in worksheets if ws.title.strip().lower() == nombre_pestana.lower()), None)
         
-        nombres_pestanas = [s.title for s in spreadsheet.worksheets()]
-        sheet_name_final = next((s for s in nombres_pestanas if s.strip().upper() == "RESUMEN"), None)
-        
-        if not sheet_name_final:
-            st.error("❌ No encontré la pestaña RESUMEN")
+        if not target_ws:
+            st.error(f"❌ Pestaña '{nombre_pestana}' no encontrada en {nombre_archivo}")
             return pd.DataFrame()
 
-        sheet = spreadsheet.worksheet(sheet_name_final)
-        all_values = sheet.get_all_values()
-        
-        df = pd.DataFrame(all_values[2:], columns=all_values[1])
+        lista_datos = target_ws.get_values()
+        if not lista_datos or len(lista_datos) < 2: return pd.DataFrame()
 
-        # Configuración de Día y OC
-        nuevos_nombres = list(df.columns)
-        nuevos_nombres[0] = 'Día'
-        df.columns = nuevos_nombres
-        df['indice_original'] = range(3, len(df) + 3)
+        df = pd.DataFrame(lista_datos[2:], columns=lista_datos[1])
+        df.columns.values[0] = 'Día'
         df['Día'] = df['Día'].replace('', None).ffill()
+        df['idx_orig'] = range(3, len(df) + 3)
+        df.columns.values[1] = 'Tienda_ID'
+        df['Tienda_ID'] = df['Tienda_ID'].astype(str).str.strip()
         
-        if len(df.columns) >= 35:
-            nuevos_nombres = list(df.columns)
-            nuevos_nombres[34] = 'OC'
-            df.columns = nuevos_nombres
-
-        col_tienda = next((c for c in df.columns if 'Tienda' in c or 'Producto' in c), df.columns[1])
-        df = df.rename(columns={col_tienda: 'Codigo Tienda / Producto'})
-        df['Codigo Tienda / Producto'] = df['Codigo Tienda / Producto'].astype(str).str.strip()
-        
+        if len(df.columns) >= 35: df.columns.values[34] = 'OC'
         return df
     except Exception as e:
-        st.error(f"Error detallado: {e}")
+        st.error(f"Fallo crítico procesando datos: {e}")
         return pd.DataFrame()
-# --- INTERFAZ ---
-st.title("📊 Análisis de Ventas PANUS")
 
-df = cargar_datos_resumen()
+# --- 3. INTERFAZ ---
+st.sidebar.title("🚀 Panel de Control")
+opcion = st.sidebar.radio("Ir a:", ["📅 Semana Actual", "📚 Historial"])
 
-if not df.empty:
-    opcion = st.sidebar.radio("Menú:", ["Buscar por Tienda", "Reporte de Despachos"])
+if opcion == "📅 Semana Actual":
+    archivo, pestana = "Ventas PANUS 2026", "Resumen"
+    st.title("📊 Semana Actual")
+else:
+    st.sidebar.subheader("Configuración Historial")
+    # USAMOS LOS NOMBRES QUE CONFIRMASTE
+    archivo = st.sidebar.selectbox("Selecciona el archivo:", ["Resumen Pedidos 2026", "Resumen Pedidos 2025"])
+    
+    client_aux = obtener_cliente()
+    if client_aux:
+        try:
+            sh_h = client_aux.open(archivo)
+            lista_p = [ws.title for ws in sh_h.worksheets()]
+            pestana = st.sidebar.selectbox("Selecciona la Pestaña (Semana):", lista_p)
+            st.title(f"📖 Historial: {archivo}")
+        except Exception as e:
+            st.sidebar.error(f"No se pudo acceder a {archivo}. Verifica que esté compartido con el correo del JSON.")
+            pestana = None
+    else:
+        pestana = None
 
-    # ---------------------------------------------------------
-    # OPCIÓN 1: BUSCAR POR TIENDA (NO SE TOCA)
-    # ---------------------------------------------------------
-    if opcion == "Buscar por Tienda":
-        st.subheader("🏪 Resumen de Pedido")
-        lista_tiendas = sorted([
-            t for t in df['Codigo Tienda / Producto'].unique() 
-            if t and str(t).strip() != "" and str(t).upper().startswith(('T', 'E'))
-        ])
-        tienda_sel = st.selectbox("Selecciona Tienda:", lista_tiendas)
-
-        if tienda_sel:
-            datos_tienda = df[df['Codigo Tienda / Producto'] == tienda_sel]
-            
-            def es_valido(val):
-                try:
-                    return float(str(val).replace(',','.')) > 0
-                except:
-                    return False
-
-            columnas_finales = ['Día', 'Codigo Tienda / Producto']
-            for i in range(2, 31):
-                if i < len(datos_tienda.columns):
-                    col_actual = datos_tienda.columns[i]
-                    if any(es_valido(x) for x in datos_tienda[col_actual]):
-                        columnas_finales.append(col_actual)
-            
-            if 'OC' in datos_tienda.columns:
-                if any(str(x).strip() != "" for x in datos_tienda['OC']):
-                    columnas_finales.append('OC')
-            
-            columnas_finales = list(dict.fromkeys(columnas_finales))
-            st.table(datos_tienda[columnas_finales])
-
-    # ---------------------------------------------------------
-    # OPCIÓN 2: REPORTE DE DESPACHOS (NUEVO ENFOQUE)
-    # ---------------------------------------------------------
-    elif opcion == "Reporte de Despachos":
-        st.subheader("📅 Reporte de Despachos por Día")
+# --- 4. PROCESAMIENTO Y TABLAS ---
+if archivo and pestana:
+    df = cargar_datos_seguro(archivo, pestana)
+    
+    if not df.empty:
+        st.sidebar.divider()
+        tipo = st.sidebar.radio("Buscar:", ["🏪 Tienda Individual", "🚛 Despachos del Día"])
         
-        dias_semana = ["Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado", "Domingo"]
-        dia_sel = st.selectbox("Selecciona el Día de Despacho:", dias_semana)
-
-        # Filtro 1: Por el día seleccionado
-        # Filtro 2: Que empiecen con T o E
-        df_dia = df[
-            (df['Día'].astype(str).str.upper().str.contains(dia_sel.upper())) & 
-            (df['Codigo Tienda / Producto'].str.upper().str.startswith(('T', 'E')))
-        ].copy()
-
-        if not df_dia.empty:
-            # Separamos Capital (Filas < 214) e Interior (Filas >= 214)
-            df_capital = df_dia[df_dia['indice_original'] < 214]
-            df_interior = df_dia[df_dia['indice_original'] >= 214]
-
-            # Función para limpiar columnas de cada bloque (solo productos con datos > 0)
-            def filtrar_columnas_con_datos(df_bloque):
-                if df_bloque.empty: return pd.DataFrame()
-                
-                def es_valido(val):
-                    try: return float(str(val).replace(',','.')) > 0
-                    except: return False
-                
-                cols_finales = ['Día', 'Codigo Tienda / Producto']
-                # Revisamos productos C a AE
-                for i in range(2, 31):
-                    col = df_bloque.columns[i]
-                    if any(es_valido(x) for x in df_bloque[col]):
-                        cols_finales.append(col)
-                
-                if 'OC' in df_bloque.columns:
-                    cols_finales.append('OC')
-                
-                return df_bloque[list(dict.fromkeys(cols_finales))]
-
-            # Mostrar Capital
-            st.markdown("### 🏘️ Tiendas Capital")
-            if not df_capital.empty:
-                st.table(filtrar_columnas_con_datos(df_capital))
-            else:
-                st.write("No hay despachos para Capital este día.")
-
-            st.divider()
-
-            # Mostrar Interior
-            st.markdown("### 🚛 Tiendas Interior")
-            if not df_interior.empty:
-                st.table(filtrar_columnas_con_datos(df_interior))
-            else:
-                st.write("No hay despachos para el Interior este día.")
+        if tipo == "🏪 Tienda Individual":
+            tiendas = sorted([t for t in df['Tienda_ID'].unique() if str(t).upper().startswith(('T', 'E'))])
+            sel = st.selectbox("Tienda:", tiendas)
+            if sel:
+                res = df[df['Tienda_ID'] == sel]
+                cols_f = ['Día', 'Tienda_ID']
+                for c in df.columns[2:31]:
+                    if any(x for x in res[c] if str(x).strip() not in ['', '0', '0.0']):
+                        cols_f.append(c)
+                if 'OC' in df.columns: cols_f.append('OC')
+                final = res[cols_f].copy()
+                final.columns = [f"<div>{c}</div>" for c in final.columns]
+                st.write(final.to_html(escape=False, index=False), unsafe_allow_html=True)
+        
         else:
-            st.warning(f"No se encontraron registros para el día {dia_sel} con tiendas T o E.")
+            dia = st.selectbox("Día:", ["Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado", "Domingo"])
+            df_dia = df[df['Día'].astype(str).str.upper().str.contains(dia.upper())]
+            def dibujar(sub_df, titulo):
+                st.subheader(titulo)
+                if sub_df.empty: return
+                c_dia = ['Día', 'Tienda_ID']
+                for c in sub_df.columns[2:31]:
+                    if any(x for x in sub_df[c] if str(x).strip() not in ['', '0', '0.0']): c_dia.append(c)
+                if 'OC' in sub_df.columns: c_dia.append('OC')
+                f = sub_df[list(dict.fromkeys(c_dia))].copy()
+                f.columns = [f"<div>{x}</div>" for x in f.columns]
+                st.write(f.to_html(escape=False, index=False), unsafe_allow_html=True)
+            
+            dibujar(df_dia[df_dia['idx_orig'] < 214], "🏘️ Capital")
+            st.divider()
+            dibujar(df_dia[df_dia['idx_orig'] >= 214], "🚛 Interior")
