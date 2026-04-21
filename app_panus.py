@@ -9,64 +9,54 @@ st.set_page_config(page_title="Dashboard PANUS", layout="wide")
 @st.cache_data(ttl=60)
 def cargar_datos_resumen():
     try:
-        ruta_actual = os.path.dirname(os.path.abspath(__file__))
-        # Usamos el nombre del archivo de credenciales que ya tienes
-        ruta_json = os.path.join(ruta_actual, "credenciales.json")
-        
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        creds = ServiceAccountCredentials.from_json_keyfile_name(ruta_json, scope)
-        client = gspread.authorize(creds)
         
+        # --- LÓGICA PARA DETECTAR SI ESTÁ EN LA NUBE O EN TU PC ---
+        if "gcp_service_account" in st.secrets:
+            # Si está en Streamlit Cloud, usa los Secrets
+            creds_dict = dict(st.secrets["gcp_service_account"])
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        else:
+            # Si está en tu PC, usa el archivo local
+            ruta_actual = os.path.dirname(os.path.abspath(__file__))
+            ruta_json = os.path.join(ruta_actual, "credenciales.json")
+            creds = ServiceAccountCredentials.from_json_keyfile_name(ruta_json, scope)
+        
+        client = gspread.authorize(creds)
         spreadsheet = client.open("Ventas PANUS 2026")
         
         nombres_pestanas = [s.title for s in spreadsheet.worksheets()]
-        nombre_objetivo = "RESUMEN"
-        sheet_name_final = next((s for s in nombres_pestanas if s.strip().upper() == nombre_objetivo), None)
+        sheet_name_final = next((s for s in nombres_pestanas if s.strip().upper() == "RESUMEN"), None)
         
         if not sheet_name_final:
-            st.error(f"❌ No encontré la pestaña '{nombre_objetivo}'.")
+            st.error("❌ No encontré la pestaña RESUMEN")
             return pd.DataFrame()
 
         sheet = spreadsheet.worksheet(sheet_name_final)
         all_values = sheet.get_all_values()
         
-        if len(all_values) < 2:
-            return pd.DataFrame()
+        df = pd.DataFrame(all_values[2:], columns=all_values[1])
 
-        encabezados = all_values[1] 
-        datos = all_values[2:]      
-        
-        # Creamos el DataFrame
-        df = pd.DataFrame(datos, columns=encabezados)
-
-        # --- PREPARACIÓN DE DATOS (Día y OC) ---
+        # Configuración de Día y OC
         nuevos_nombres = list(df.columns)
         nuevos_nombres[0] = 'Día'
         df.columns = nuevos_nombres
-        
-        # Guardamos el índice original para saber qué fila es (Capital vs Interior)
-        df['indice_original'] = range(3, len(df) + 3) # Empezamos en 3 porque la fila 1 y 2 son encabezados
-        
-        # Rellenamos el día
+        df['indice_original'] = range(3, len(df) + 3)
         df['Día'] = df['Día'].replace('', None).ffill()
         
-        # Nombre para la OC
         if len(df.columns) >= 35:
             nuevos_nombres = list(df.columns)
             nuevos_nombres[34] = 'OC'
             df.columns = nuevos_nombres
 
-        # Identificar columna de tienda
         col_tienda = next((c for c in df.columns if 'Tienda' in c or 'Producto' in c), df.columns[1])
         df = df.rename(columns={col_tienda: 'Codigo Tienda / Producto'})
         df['Codigo Tienda / Producto'] = df['Codigo Tienda / Producto'].astype(str).str.strip()
         
         return df
-        
     except Exception as e:
         st.error(f"Error detallado: {e}")
         return pd.DataFrame()
-
 # --- INTERFAZ ---
 st.title("📊 Análisis de Ventas PANUS")
 
