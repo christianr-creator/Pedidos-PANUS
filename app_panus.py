@@ -11,17 +11,18 @@ def cargar_datos_resumen():
     try:
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
         
+
         # --- LÓGICA PARA DETECTAR SI ESTÁ EN LA NUBE O EN TU PC ---
         if "gcp_service_account" in st.secrets:
-            # Si está en Streamlit Cloud, usa los Secrets
+            # Si está en Streamlit Cloud
             creds_dict = dict(st.secrets["gcp_service_account"])
+            
+            # TRUCO: Reparar la llave privada si viene con errores de formato
+            if "private_key" in creds_dict:
+                creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+            
             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        else:
-            # Si está en tu PC, usa el archivo local
-            ruta_actual = os.path.dirname(os.path.abspath(__file__))
-            ruta_json = os.path.join(ruta_actual, "credenciales.json")
-            creds = ServiceAccountCredentials.from_json_keyfile_name(ruta_json, scope)
-        
+               
         client = gspread.authorize(creds)
         spreadsheet = client.open("Ventas PANUS 2026")
         
