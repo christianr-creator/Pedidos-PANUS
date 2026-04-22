@@ -11,11 +11,11 @@ st.markdown("""
     th { vertical-align: bottom !important; text-align: center !important; height: 150px !important; }
     th > div { writing-mode: vertical-rl !important; transform: rotate(180deg) !important; white-space: nowrap !important; font-family: sans-serif !important; font-size: 13px !important; }
     td { white-space: nowrap !important; text-align: center !important; padding: 0 10px !important; }
-    .header-zona { background-color: #f0f2f6; font-weight: bold; text-align: left !important; padding: 10px !important; border-top: 2px solid #d1d1d1; margin-top: 20px; color: #1f77b4; }
+    .header-zona { background-color: #262730; color: white; font-weight: bold; text-align: center !important; padding: 5px !important; margin-top: 15px; }
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. CONEXIÓN HÍBRIDA ---
+# --- 2. CONEXIÓN ---
 def obtener_cliente():
     try:
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -28,7 +28,7 @@ def obtener_cliente():
             creds = ServiceAccountCredentials.from_json_keyfile_name(ruta_json, scope)
         return gspread.authorize(creds)
     except Exception as e:
-        st.error(f"❌ Error de conexión: {e}")
+        st.error(f"Error: {e}")
         return None
 
 def limpiar_columnas(columns):
@@ -38,7 +38,7 @@ def limpiar_columnas(columns):
         item = item.strip() if item else ""
         if item in counts:
             counts[item] += 1
-            cols.append(f"{item}_DUPLICADO_{counts[item]}")
+            cols.append(f"{item}_DUP_{counts[item]}")
         else:
             counts[item] = 1
             cols.append(item)
@@ -53,56 +53,45 @@ def cargar_maestros():
         sh = client.open("Ventas PANUS 2026")
         ws = sh.worksheet("Resumen")
         datos = ws.get_values()
-        if len(datos) < 2: return [], [], pd.DataFrame(), []
-        
-        # Cargamos el DataFrame
         df = pd.DataFrame(datos[2:], columns=limpiar_columnas(datos[1]))
         df.rename(columns={df.columns[0]: 'Día', df.columns[1]: 'Tienda_ID'}, inplace=True)
         
-        # Mapeo de filas (datos[2] es la fila 3 del Excel)
         df['fila_excel'] = df.index + 3
         
-        # --- LÓGICA DE FILAS ACTUALIZADA ---
-        def clasificar_zona(fila):
-            if 3 <= fila <= 212:
-                return 'CAPITAL'
-            elif fila >= 214:
-                return 'INTERIOR'
-            return 'OCULTO' # Fila 213 o encabezados
+        # --- FILTRO ESTRICTO: Solo tiendas que inician con T o E ---
+        def es_tienda_valida(id_t):
+            id_str = str(id_t).strip().upper()
+            return id_str.startswith('T') or id_str.startswith('E')
+
+        df['Valido'] = df['Tienda_ID'].apply(es_tienda_valida)
         
-        df['Zona'] = df['fila_excel'].apply(clasificar_zona)
+        # Solo procesamos lo válido y respetamos los rangos de zona
+        df = df[df['Valido'] == True].copy()
+        df['Zona'] = df['fila_excel'].apply(lambda f: 'CAPITAL' if 3 <= f <= 212 else ('INTERIOR' if f >= 214 else 'SALTO'))
+        
         df['Día'] = df['Día'].replace('', None).ffill()
         df['Tienda_ID'] = df['Tienda_ID'].astype(str).str.strip()
         
-        excluir = ['Día', 'Tienda_ID', 'Zona', 'fila_excel', 'T.I.', 'T.C.G', 'T.M', 'OC', 'idx_orig', '']
-        productos = [c for c in df.columns if c not in excluir and "_DUPLICADO_" not in c and not c.startswith('Col_')]
+        excluir = ['Día', 'Tienda_ID', 'Zona', 'fila_excel', 'Valido', 'T.I.', 'T.C.G', 'T.M', 'OC', '']
+        productos = [c for c in df.columns if c not in excluir and "_DUP_" not in c and not c.startswith('Col_')]
         
-        # Solo tomamos tiendas válidas (que no sean vacías ni la fila de separación)
-        tiendas = sorted([t for t in df[df['Zona'] != 'OCULTO']['Tienda_ID'].unique() if t and t != 'None'])
+        tiendas = sorted([t for t in df[df['Zona'] != 'SALTO']['Tienda_ID'].unique() if t])
         dias = [d for d in df['Día'].unique().tolist() if d]
         
         return productos, tiendas, df, dias
-    except Exception as e:
-        st.error(f"❌ Error: {e}")
-        return [], [], pd.DataFrame(), []
+    except: return [], [], pd.DataFrame(), []
 
 # --- 4. INTERFAZ ---
 st.title("🥐 Sistema de Gestión PANUS")
-
 lista_prod, lista_tiendas, df_actual, lista_dias = cargar_maestros()
 
-if not lista_tiendas:
-    st.stop()
-
-st.sidebar.title("🚀 Menú Principal")
 menu = st.sidebar.radio("Ir a:", ["📅 Semana Actual", "📚 Historial"])
 
 if menu == "📅 Semana Actual":
-    st.header("📊 Consulta de Ventas")
-    opcion = st.radio("Selecciona vista:", ["Tienda Individual", "Día Completo (Por Zonas)"], horizontal=True)
+    opcion = st.radio("Ver por:", ["Tienda", "Día Completo"], horizontal=True)
     
-    if opcion == "Tienda Individual":
-        sel_t = st.selectbox("Selecciona Tienda:", [""] + lista_tiendas)
+    if opcion == "Tienda":
+        sel_t = st.selectbox("Tienda:", [""] + lista_tiendas)
         if sel_t:
             res = df_actual[df_actual['Tienda_ID'] == sel_t].copy()
             cols = ['Día', 'Tienda_ID']
@@ -115,34 +104,42 @@ if menu == "📅 Semana Actual":
             st.write(res[cols].to_html(escape=False, index=False), unsafe_allow_html=True)
 
     else:
-        sel_d = st.selectbox("Selecciona el Día:", [""] + lista_dias)
+        sel_d = st.selectbox("Día:", [""] + lista_dias)
         if sel_d:
-            df_dia = df_actual[df_actual['Día'] == sel_d].copy()
+            df_dia = df_actual[(df_actual['Día'] == sel_d) & (df_actual['Zona'] != 'SALTO')].copy()
+            
+            cols_con_datos = []
+            for p in lista_prod:
+                if p in df_dia.columns:
+                    if pd.to_numeric(df_dia[p], errors='coerce').sum() > 0:
+                        cols_con_datos.append(p)
+            
+            fila_total = {'Tienda_ID': '<strong>TOTAL</strong>'}
             
             for zona in ['CAPITAL', 'INTERIOR']:
-                res_z = df_dia[df_dia['Zona'] == zona].copy()
-                
-                if not res_z.empty:
-                    # Filtramos tiendas que realmente tengan algún pedido
-                    # (opcional, para no ver filas de 0)
-                    st.markdown(f"<div class='header-zona'>📍 TIENDAS DE LA {zona}</div>", unsafe_allow_html=True)
+                df_z = df_dia[df_dia['Zona'] == zona].copy()
+                if not df_z.empty:
+                    st.markdown(f"<div class='header-zona'>📍 {zona}</div>", unsafe_allow_html=True)
+                    for p in cols_con_datos:
+                        nums = pd.to_numeric(df_z[p], errors='coerce').fillna(0)
+                        df_z[p] = nums.apply(lambda x: int(x) if x != 0 else "")
+                        fila_total[p] = fila_total.get(p, 0) + int(nums.sum())
                     
-                    cols_z = ['Tienda_ID']
-                    fila_total = {'Tienda_ID': '<strong>SUBTOTAL</strong>'}
-                    columnas_finales = []
+                    c_ver = ['Tienda_ID'] + cols_con_datos
+                    if 'OC' in df_z.columns: c_ver.append('OC')
+                    st.write(df_z[c_ver].to_html(escape=False, index=False), unsafe_allow_html=True)
 
-                    for p in lista_prod:
-                        if p in res_z.columns:
-                            nums = pd.to_numeric(res_z[p], errors='coerce').fillna(0)
-                            if nums.sum() > 0:
-                                columnas_finales.append(p)
-                                res_z[p] = nums.apply(lambda x: int(x) if x != 0 else "")
-                                fila_total[p] = f"<strong>{int(nums.sum())}</strong>"
-                    
-                    mostrar_cols = cols_z + columnas_finales
-                    if 'OC' in res_z.columns: mostrar_cols.append('OC')
-                    
-                    # Generar tabla
-                    res_html = pd.concat([res_z[mostrar_cols], pd.DataFrame([fila_total])], ignore_index=True)
-                    res_html.columns = [f"<div>{c}</div>" for c in res_html.columns]
-                    st.write(res_html.to_html(escape=False, index=False), unsafe_allow_html=True)
+            # FILA ÚNICA DE TOTAL AL FINAL
+            for p in cols_con_datos:
+                fila_total[p] = f"<strong>{fila_total[p]}</strong>"
+            
+            st.markdown("---")
+            df_tot = pd.DataFrame([fila_total])
+            cols_t = ['Tienda_ID'] + cols_con_datos
+            if 'OC' in df_dia.columns: 
+                cols_t.append('OC')
+                df_tot['OC'] = '---'
+            
+            df_tot = df_tot[cols_t]
+            df_tot.columns = [f"<div>{c}</div>" for c in df_tot.columns]
+            st.write(df_tot.to_html(escape=False, index=False), unsafe_allow_html=True)
